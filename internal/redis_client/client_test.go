@@ -32,7 +32,9 @@ func setupTestRedis(t *testing.T) *Client {
 	// Cleanup after test
 	t.Cleanup(func() {
 		client.rdb.FlushDB(ctx)
-		client.Close()
+		if err := client.Close(); err != nil {
+			t.Logf("Warning: failed to close Redis client: %v", err)
+		}
 	})
 
 	return client
@@ -119,7 +121,7 @@ func TestClient_GPUState(t *testing.T) {
 	retrievedState, err = client.GetGPUState(ctx, gpuID)
 	assert.NoError(t, err)
 	assert.Equal(t, "", retrievedState.User)
-	assert.True(t, retrievedState.LastReleased.Time.IsZero())
+	assert.True(t, retrievedState.LastReleased.IsZero())
 }
 
 func TestClient_AllocationLock(t *testing.T) {
@@ -139,7 +141,9 @@ func TestClient_AllocationLock(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Cleanup
-	client.ReleaseAllocationLock(ctx)
+	if err := client.ReleaseAllocationLock(ctx); err != nil {
+		t.Logf("Warning: failed to release allocation lock: %v", err)
+	}
 }
 
 func TestClient_AllocationLock_Concurrency(t *testing.T) {
@@ -147,7 +151,7 @@ func TestClient_AllocationLock_Concurrency(t *testing.T) {
 	ctx := context.Background()
 
 	t.Log("Starting concurrency test - testing lock contention (may take up to 5 seconds)")
-	
+
 	// Acquire lock
 	err := client.AcquireAllocationLock(ctx)
 	assert.NoError(t, err)
@@ -160,7 +164,11 @@ func TestClient_AllocationLock_Concurrency(t *testing.T) {
 		RedisDB:   15, // Same test database
 	}
 	client2 := NewClient(config2)
-	defer client2.Close()
+	defer func() {
+		if err := client2.Close(); err != nil {
+			t.Logf("Warning: failed to close Redis client2: %v", err)
+		}
+	}()
 
 	// Use a timeout context for the second lock attempt
 	timeoutCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -189,7 +197,9 @@ func TestClient_AllocationLock_Concurrency(t *testing.T) {
 	t.Log("Concurrency test completed successfully")
 
 	// Cleanup
-	client2.ReleaseAllocationLock(ctx)
+	if err := client2.ReleaseAllocationLock(ctx); err != nil {
+		t.Logf("Warning: failed to release allocation lock: %v", err)
+	}
 }
 
 func TestClient_AtomicReserveGPUs_SimpleCase(t *testing.T) {
@@ -295,7 +305,7 @@ func TestClient_AtomicReserveGPUs_ManualReservation(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "testuser", state.User)
 	assert.Equal(t, types.ReservationTypeManual, state.Type)
-	assert.False(t, state.ExpiryTime.Time.IsZero())
+	assert.False(t, state.ExpiryTime.IsZero())
 }
 
 func TestClient_ClearAllGPUStates(t *testing.T) {
@@ -336,7 +346,7 @@ func TestClient_NewClient(t *testing.T) {
 	config := &types.Config{
 		RedisHost: "localhost",
 		RedisPort: 6379,
-		RedisDB:   0,
+		RedisDB:   15,
 	}
 
 	client := NewClient(config)
@@ -345,4 +355,149 @@ func TestClient_NewClient(t *testing.T) {
 
 	err := client.Close()
 	assert.NoError(t, err)
+}
+
+func TestClient_AtomicReserveSpecificGPUs(t *testing.T) {
+	client := setupTestRedis(t)
+	ctx := context.Background()
+
+	// Initialize GPU pool
+	err := client.SetGPUCount(ctx, 4)
+	require.NoError(t, err)
+
+	// Test 1: Reserve specific GPUs successfully
+	request := &types.AllocationRequest{
+		GPUIDs:          []int{1, 3},
+		User:            "testuser",
+		ReservationType: types.ReservationTypeRun,
+	}
+
+	allocatedGPUs, err := client.AtomicReserveGPUs(ctx, request, []int{})
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, []int{1, 3}, allocatedGPUs)
+
+	// Verify GPUs are reserved
+	state1, err := client.GetGPUState(ctx, 1)
+	assert.NoError(t, err)
+	assert.Equal(t, "testuser", state1.User)
+	assert.Equal(t, types.ReservationTypeRun, state1.Type)
+
+	state3, err := client.GetGPUState(ctx, 3)
+	assert.NoError(t, err)
+	assert.Equal(t, "testuser", state3.User)
+	assert.Equal(t, types.ReservationTypeRun, state3.Type)
+
+	// Test 2: Try to reserve already reserved GPUs
+	request2 := &types.AllocationRequest{
+		GPUIDs:          []int{1, 2},
+		User:            "anotheruser",
+		ReservationType: types.ReservationTypeRun,
+	}
+
+	_, err = client.AtomicReserveGPUs(ctx, request2, []int{})
+	require.Error(t, err, "Expected error when trying to reserve already reserved GPUs")
+	assert.Contains(t, err.Error(), "already reserved")
+
+	// Verify GPU 2 is still available
+	state2, err := client.GetGPUState(ctx, 2)
+	assert.NoError(t, err)
+	assert.Empty(t, state2.User)
+
+	// Test 3: Reserve GPUs marked as unreserved
+	request3 := &types.AllocationRequest{
+		GPUIDs:          []int{0, 2},
+		User:            "user3",
+		ReservationType: types.ReservationTypeManual,
+	}
+
+	_, err = client.AtomicReserveGPUs(ctx, request3, []int{0}) // GPU 0 is in unreserved list
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "in use without reservation")
+
+	// Test 4: Invalid GPU ID (out of range)
+	request4 := &types.AllocationRequest{
+		GPUIDs:          []int{2, 5}, // GPU 5 doesn't exist (pool size is 4)
+		User:            "user4",
+		ReservationType: types.ReservationTypeManual,
+	}
+
+	_, err = client.AtomicReserveGPUs(ctx, request4, []int{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "out of range")
+
+	// Test 5: Successfully reserve remaining available GPUs
+	request5 := &types.AllocationRequest{
+		GPUIDs:          []int{2},
+		User:            "user5",
+		ReservationType: types.ReservationTypeManual,
+		ExpiryTime:      func() *time.Time { t := time.Now().Add(time.Hour); return &t }(),
+	}
+
+	allocatedGPUs, err = client.AtomicReserveGPUs(ctx, request5, []int{})
+	assert.NoError(t, err)
+	assert.Equal(t, []int{2}, allocatedGPUs)
+
+	// Verify manual reservation with expiry
+	state2, err = client.GetGPUState(ctx, 2)
+	assert.NoError(t, err)
+	assert.Equal(t, "user5", state2.User)
+	assert.Equal(t, types.ReservationTypeManual, state2.Type)
+	assert.False(t, state2.ExpiryTime.IsZero())
+}
+
+func TestClient_AtomicReserveGPUs_MixedMode(t *testing.T) {
+	client := setupTestRedis(t)
+	ctx := context.Background()
+
+	// Initialize GPU pool
+	err := client.SetGPUCount(ctx, 8)
+	require.NoError(t, err)
+
+	// Test allocating by count (original behavior)
+	request1 := &types.AllocationRequest{
+		GPUCount:        3,
+		User:            "user1",
+		ReservationType: types.ReservationTypeRun,
+	}
+
+	allocatedGPUs1, err := client.AtomicReserveGPUs(ctx, request1, []int{})
+	assert.NoError(t, err)
+	assert.Len(t, allocatedGPUs1, 3)
+	t.Logf("First allocation (by count): %v", allocatedGPUs1)
+
+	// Test allocating specific IDs (pick ones not allocated in first request)
+	// We'll dynamically select GPUs that weren't allocated
+	allocatedMap := make(map[int]bool)
+	for _, gpu := range allocatedGPUs1 {
+		allocatedMap[gpu] = true
+	}
+
+	var availableGPUs []int
+	for i := 0; i < 8; i++ {
+		if !allocatedMap[i] {
+			availableGPUs = append(availableGPUs, i)
+		}
+	}
+
+	// Pick 3 available GPUs
+	require.True(t, len(availableGPUs) >= 3, "Need at least 3 available GPUs")
+	selectedGPUs := availableGPUs[:3]
+
+	request2 := &types.AllocationRequest{
+		GPUIDs:          selectedGPUs,
+		User:            "user2",
+		ReservationType: types.ReservationTypeRun,
+	}
+
+	allocatedGPUs2, err := client.AtomicReserveGPUs(ctx, request2, []int{})
+	assert.NoError(t, err)
+	assert.ElementsMatch(t, selectedGPUs, allocatedGPUs2)
+	t.Logf("Second allocation (by IDs): %v", allocatedGPUs2)
+
+	// Verify no overlap between allocations
+	for _, gpu1 := range allocatedGPUs1 {
+		for _, gpu2 := range allocatedGPUs2 {
+			assert.NotEqual(t, gpu1, gpu2, "GPU %d allocated to both users", gpu1)
+		}
+	}
 }

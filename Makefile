@@ -46,10 +46,22 @@ clean:
 	@echo "Cleaning build artifacts"
 	@rm -rf $(BUILD_DIR)
 
+.PHONY: lint
+lint:
+	@echo "Running lint"
+	@if ! command -v golangci-lint >/dev/null 2>&1 ; then curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(shell go env GOPATH)/bin v2.2.1 ; fi
+	@echo "Using golangci-lint version: $$(golangci-lint --version | head -n 1)"
+	@golangci-lint run
+
+.PHONY: fmt
+fmt:
+	@echo "Running fmt"
+	@go fmt ./...
+
 .PHONY: test
 test:
 	@echo "Running tests"
-	@go test -v ./...
+	@go test -v -count=1 -p 1 ./...
 
 .PHONY: test-short
 test-short:
@@ -59,7 +71,7 @@ test-short:
 .PHONY: test-coverage
 test-coverage:
 	@echo "Running tests with coverage"
-	@go test -v -coverprofile=coverage.out ./...
+	@go test -v -count=1 -p 1 -coverprofile=coverage.out ./...
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated at coverage.html"
 

@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/russellb/canhazgpu/internal/gpu"
 	"github.com/russellb/canhazgpu/internal/redis_client"
 	"github.com/russellb/canhazgpu/internal/types"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -30,11 +30,15 @@ func init() {
 
 func runReport(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
-	
+
 	// Initialize Redis client
 	config := getConfig()
 	client := redis_client.NewClient(config)
-	defer client.Close()
+	defer func() {
+		if err := client.Close(); err != nil {
+			fmt.Printf("Warning: failed to close Redis client: %v\n", err)
+		}
+	}()
 
 	// Test connection
 	if err := client.Ping(ctx); err != nil {
@@ -83,8 +87,8 @@ func getCurrentUsageRecords(statuses []gpu.GPUStatusInfo, now time.Time) []*type
 			record := &types.UsageRecord{
 				User:            status.User,
 				GPUID:           status.GPUID,
-				StartTime:       types.FlexibleTime{status.LastHeartbeat.Add(-status.Duration)},
-				EndTime:         types.FlexibleTime{now},
+				StartTime:       types.FlexibleTime{Time: status.LastHeartbeat.Add(-status.Duration)},
+				EndTime:         types.FlexibleTime{Time: now},
 				Duration:        duration,
 				ReservationType: status.ReservationType,
 			}
@@ -127,14 +131,14 @@ func displayReport(records []*types.UsageRecord, startTime, endTime time.Time) {
 
 	// Display report header
 	fmt.Printf("\n=== GPU Reservation Report ===\n")
-	fmt.Printf("Period: %s to %s (%d days)\n", 
-		startTime.Format("2006-01-02"), 
-		endTime.Format("2006-01-02"), 
+	fmt.Printf("Period: %s to %s (%d days)\n",
+		startTime.Format("2006-01-02"),
+		endTime.Format("2006-01-02"),
 		reportDays)
 	fmt.Printf("\n")
 
 	// Display per-user statistics
-	fmt.Printf("%-20s %15s %15s %10s %10s\n", 
+	fmt.Printf("%-20s %15s %15s %10s %10s\n",
 		"User", "GPU Hours", "Percentage", "Run", "Manual")
 	fmt.Printf("%s\n", strings.Repeat("-", 75))
 

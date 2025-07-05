@@ -205,7 +205,11 @@ func getProcessOwnerFromProc(pid int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			fmt.Printf("Warning: failed to close file: %v\n", err)
+		}
+	}()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -258,4 +262,3 @@ func GetUnreservedGPUs(ctx context.Context, usage map[int]*types.GPUUsage, memor
 func IsGPUInUnreservedUse(usage *types.GPUUsage, memoryThreshold int) bool {
 	return usage != nil && usage.MemoryMB > memoryThreshold
 }
-
