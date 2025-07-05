@@ -22,7 +22,7 @@ func isNvidiaSmiAvailable() bool {
 func TestIsNvidiaSmiAvailable(t *testing.T) {
 	available := isNvidiaSmiAvailable()
 	t.Logf("nvidia-smi availability: %v", available)
-	
+
 	// This test just documents the current state, doesn't assert a specific value
 	// since it depends on the test environment
 }
@@ -242,6 +242,7 @@ func TestRunCommand_HeartbeatCleanup_Integration(t *testing.T) {
 	availableState := &types.GPUState{
 		LastReleased: types.FlexibleTime{Time: now},
 	}
+
 	err = client.SetGPUState(ctx, 0, availableState)
 	assert.NoError(t, err)
 
@@ -249,7 +250,11 @@ func TestRunCommand_HeartbeatCleanup_Integration(t *testing.T) {
 	state, err = client.GetGPUState(ctx, 0)
 	assert.NoError(t, err)
 	assert.Empty(t, state.User, "GPU should be released")
-	assert.False(t, state.LastReleased.IsZero(), "Should have release timestamp")
+
+	// Check that the state has a release timestamp
+	// Use ToTime() to be more explicit about the check
+	releaseTime := state.LastReleased.ToTime()
+	assert.False(t, releaseTime.IsZero(), "Should have release timestamp")
 
 	t.Log("GPU cleanup verified - this simulates the fixed behavior")
 }
